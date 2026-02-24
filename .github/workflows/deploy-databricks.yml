@@ -1,0 +1,86 @@
+# ============================================================================
+# Databricks Workspace Deployment Workflow
+# ============================================================================
+# Purpose: Deploy Databricks workspace notebooks from Git to Databricks workspace
+#          when a pull request is merged into main or master branch.
+# ============================================================================
+
+name: Deploy to Databricks Workspace
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+      - master
+
+env:
+  DATABRICKS_LOCAL_FOLDER: ./databricks
+  DATABRICKS_TARGET_FOLDER: /Repos/Databricks-git
+  DATABRICKS_CLI_VERSION: "0.200.0"
+
+jobs:
+  deploy-databricks:
+    name: Deploy Databricks Workspace
+    runs-on: ubuntu-latest
+    
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Validate PR Merge Event
+        run: |
+          echo "✓ Workflow triggered by merged pull request"
+          echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4.1.1
+
+      - name: Validate Databricks Folder
+        run: |
+          if [ -d "${{ env.DATABRICKS_LOCAL_FOLDER }}" ]; then
+            echo "✓ Databricks folder found"
+            find "${{ env.DATABRICKS_LOCAL_FOLDER }}" -type f
+          else
+            echo "✗ Databricks folder not found"
+            exit 1
+          fi
+
+      - name: Install Databricks CLI
+        run: |
+          pip install --upgrade pip
+          pip install databricks-cli==${{ env.DATABRICKS_CLI_VERSION }}
+          databricks --version
+
+      - name: Configure Databricks Authentication
+        run: |
+          mkdir -p ~/.databricks
+          cat > ~/.databrickscfg << EOF
+          [DEFAULT]
+          host = ${{ secrets.DATABRICKS_HOST }}
+          token = ${{ secrets.DATABRICKS_TOKEN }}
+          EOF
+          chmod 600 ~/.databrickscfg
+
+      - name: Validate Databricks Connectivity
+        run: |
+          databricks workspace list / || exit 1
+
+      - name: Ensure Target Workspace Folder Exists
+        run: |
+          databricks workspace mkdirs "${{ env.DATABRICKS_TARGET_FOLDER }}" || true
+
+      - name: Deploy to Databricks Workspace
+        run: |
+          databricks workspace import_dir \
+            --overwrite \
+            "${{ env.DATABRICKS_LOCAL_FOLDER }}" \
+            "${{ env.DATABRICKS_TARGET_FOLDER }}"
+
+      - name: Verify Deployment
+        run: |
+          databricks workspace list "${{ env.DATABRICKS_TARGET_FOLDER }}"
+
+      - name: Deployment Summary
+        run: |
+          echo "✓ Databricks deployment completed"
