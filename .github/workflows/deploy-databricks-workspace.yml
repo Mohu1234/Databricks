@@ -1,0 +1,281 @@
+# ============================================================================
+# Databricks Workspace Deployment Workflow (Enhanced)
+# ============================================================================
+# Purpose: Automatically deploy Databricks workspace notebooks and files
+#          from the Git repository to a target Databricks workspace folder
+#          when a pull request is merged into the main or master branch.
+#
+# Features:
+# - Triggers on merged PRs to main/master branches
+# - Detects only changed files in the PR
+# - Deploys granularly: individual files if only one changed, entire folders if multiple files changed
+# - Uses Databricks CLI for secure, authenticated deployment
+# - Includes logging and validation at each step
+# ============================================================================
+
+name: Deploy to Databricks Workspace
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+      - master
+
+env:
+  # Configuration
+  DATABRICKS_LOCAL_FOLDER: ./
+  DATABRICKS_TARGET_FOLDER: /Shared/project-name
+  DATABRICKS_CLI_VERSION: "0.200.0"
+
+jobs:
+  detect-changes:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    
+    # Only run if the PR was merged (not just closed)
+    if: github.event.pull_request.merged == true
+    
+    outputs:
+      changed-files: ${{ steps.detect.outputs.changed_files }}
+      deployment-map: ${{ steps.detect.outputs.deployment_map }}
+      has-changes: ${{ steps.detect.outputs.has_changes }}
+    
+    steps:
+      # Step 1: Validate that the workflow was triggered by a merged PR
+      - name: Validate PR Merge Event
+        run: |
+          echo "✓ Workflow triggered by merged pull request"
+          echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+
+      # Step 2: Check out the latest code from the repository
+      - name: Checkout Code
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      # Step 3: Detect changed files and create deployment map
+      - name: Detect Changed Files and Map Deployments
+        id: detect
+        run: |
+          echo "Detecting changed files in PR..."
+          
+          # Get the list of changed files
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }} HEAD)
+          
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          echo ""
+          
+          # Filter only files in recon and scd_project directories
+          FILTERED_FILES=$(echo "$CHANGED_FILES" | grep -E '^(recon|scd_project)/' || true)
+          
+          if [ -z "$FILTERED_FILES" ]; then
+            echo "No changes detected in databricks folders (recon/scd_project)"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Filtered changed files:"
+          echo "$FILTERED_FILES"
+          echo ""
+          
+          # Create a deployment map (JSON format for flexibility)
+          # Maps: folder -> list of changed files in that folder
+          DEPLOYMENT_MAP="{}"
+          
+          echo "$FILTERED_FILES" | while read -r FILE; do
+            # Extract the top-level folder (recon or scd_project)
+            FOLDER=$(echo "$FILE" | cut -d'/' -f1)
+            
+            # Count how many files changed in this folder
+            FILE_COUNT=$(echo "$FILTERED_FILES" | grep "^$FOLDER/" | wc -l)
+            
+            # If only one file changed in this folder, deploy just that file
+            # Otherwise, deploy the entire folder
+            if [ "$FILE_COUNT" -eq 1 ]; then
+              echo "Single file change in $FOLDER: $FILE"
+              DEPLOYMENT_MAP=$(echo "$DEPLOYMENT_MAP" | jq --arg folder "$FOLDER" --arg file "$FILE" \
+                '.[$folder] = ($file)')
+            else
+              echo "Multiple files changed in $FOLDER: deploying entire folder"
+              DEPLOYMENT_MAP=$(echo "$DEPLOYMENT_MAP" | jq --arg folder "$FOLDER" \
+                '.[$folder] = "FOLDER"')
+            fi
+          done
+          
+          # Store outputs
+          echo "changed_files=$FILTERED_FILES" >> $GITHUB_OUTPUT
+          echo "deployment_map=$(echo "$DEPLOYMENT_MAP" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "✓ Deployment map created:"
+          echo "$DEPLOYMENT_MAP" | jq .
+
+  deploy-databricks:
+    name: Deploy to Databricks Workspace
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    
+    # Only run if there are changes to deploy
+    if: needs.detect-changes.outputs.has-changes == 'true'
+    
+    steps:
+      # Step 1: Check out the latest code from the repository
+      - name: Checkout Code
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0
+
+      # Step 2: Install Databricks CLI
+      - name: Install Databricks CLI
+        run: |
+          echo "Installing Databricks CLI version ${{ env.DATABRICKS_CLI_VERSION }}..."
+          pip install --upgrade pip setuptools
+          pip install databricks-cli==${{ env.DATABRICKS_CLI_VERSION }}
+          
+          # Verify installation
+          databricks --version
+          echo "✓ Databricks CLI installed successfully"
+
+      # Step 3: Configure Databricks Authentication
+      - name: Configure Databricks Authentication
+        run: |
+          # Create .databrickscfg for secure authentication
+          mkdir -p ~/.databricks
+          
+          cat > ~/.databrickscfg << EOF
+          [DEFAULT]
+          host = ${{ secrets.DATABRICKS_HOST }}
+          token = ${{ secrets.DATABRICKS_TOKEN }}
+          EOF
+          
+          chmod 600 ~/.databrickscfg
+          echo "✓ Databricks authentication configured"
+
+      # Step 4: Validate Databricks Connectivity
+      - name: Validate Databricks Connectivity
+        run: |
+          echo "Validating connection to Databricks workspace..."
+          databricks workspace list / || {
+            echo "✗ Failed to connect to Databricks workspace"
+            echo "Please verify DATABRICKS_HOST and DATABRICKS_TOKEN are set correctly"
+            exit 1
+          }
+          echo "✓ Successfully connected to Databricks workspace"
+
+      # Step 5: Create Target Folder if it doesn't exist
+      - name: Ensure Target Workspace Folders Exist
+        run: |
+          echo "Ensuring target folders exist..."
+          
+          for folder in recon scd_project; do
+            TARGET="${{ env.DATABRICKS_TARGET_FOLDER }}/$folder"
+            echo "Creating: $TARGET"
+            databricks workspace mkdirs "$TARGET" || true
+          done
+          
+          echo "✓ Target workspace folders are ready"
+
+      # Step 6: Deploy Changed Folders/Files
+      - name: Deploy Changed Files to Databricks Workspace
+        run: |
+          DEPLOYMENT_MAP='${{ needs.detect-changes.outputs.deployment-map }}'
+          echo "Deployment map: $DEPLOYMENT_MAP"
+          echo ""
+          
+          # Process each folder in the deployment map
+          echo "$DEPLOYMENT_MAP" | jq -r 'to_entries[] | "\(.key):\(.value)"' | while IFS=':' read -r FOLDER TARGET_TYPE; do
+            echo "Processing folder: $FOLDER"
+            
+            LOCAL_PATH="./$FOLDER"
+            REMOTE_PATH="${{ env.DATABRICKS_TARGET_FOLDER }}/$FOLDER"
+            
+            if [ "$TARGET_TYPE" = "FOLDER" ]; then
+              # Deploy entire folder
+              echo "  → Deploying entire folder: $FOLDER"
+              databricks workspace import_dir \
+                --overwrite \
+                "$LOCAL_PATH" \
+                "$REMOTE_PATH"
+              
+              if [ $? -eq 0 ]; then
+                echo "  ✓ Successfully deployed $FOLDER"
+              else
+                echo "  ✗ Failed to deploy $FOLDER"
+                exit 1
+              fi
+            else
+              # Deploy single file
+              FILE_PATH=$TARGET_TYPE
+              FILE_NAME=$(basename "$FILE_PATH")
+              REMOTE_FILE_PATH="$REMOTE_PATH/$FILE_NAME"
+              
+              echo "  → Deploying single file: $FILE_PATH"
+              databricks workspace import \
+                --overwrite \
+                --language PYTHON \
+                "$FILE_PATH" \
+                "$REMOTE_FILE_PATH"
+              
+              if [ $? -eq 0 ]; then
+                echo "  ✓ Successfully deployed $FILE_PATH"
+              else
+                echo "  ✗ Failed to deploy $FILE_PATH"
+                exit 1
+              fi
+            fi
+          done
+          
+          echo ""
+          echo "✓ Deployment completed successfully"
+
+      # Step 7: Verify Deployment
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployed contents..."
+          echo ""
+          
+          for folder in recon scd_project; do
+            REMOTE_PATH="${{ env.DATABRICKS_TARGET_FOLDER }}/$folder"
+            echo "Contents of $REMOTE_PATH:"
+            databricks workspace list "$REMOTE_PATH" || true
+            echo ""
+          done
+          
+          echo "✓ Deployment verification completed"
+
+      # Step 8: Log Deployment Summary
+      - name: Deployment Summary
+        run: |
+          echo "============================================"
+          echo "Deployment Summary"
+          echo "============================================"
+          echo "Repository: ${{ github.repository }}"
+          echo "Merged PR: #${{ github.event.pull_request.number }}"
+          echo "Branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Target Folders: recon, scd_project"
+          echo "Workspace Base Path: ${{ env.DATABRICKS_TARGET_FOLDER }}"
+          echo "Deployment Map: ${{ needs.detect-changes.outputs.deployment-map }}"
+          echo "Timestamp: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "============================================"
+
+      # Step 9: Handle Deployment Failure
+      - name: Handle Deployment Failure
+        if: failure()
+        run: |
+          echo "✗ Deployment workflow failed"
+          echo "Please check the logs above for details"
+          exit 1
+
+      # Step 10: Success Notification
+      - name: Deployment Success
+        if: success()
+        run: |
+          echo "✓ Databricks workspace deployment completed successfully"
+          echo "PR #${{ github.event.pull_request.number }} has been deployed to ${{ env.DATABRICKS_TARGET_FOLDER }}"
