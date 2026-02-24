@@ -1,0 +1,263 @@
+job:
+  name: scd_multi_load_type_job
+  batch_id: "2026-02-22"
+
+# ============================================
+# COMPREHENSIVE SCD CONFIGURATION
+# ============================================
+# Supported load_type values:
+#   - incremental: Append only (with optional deduplication)
+#   - scd1: Upsert (update existing, insert new) - no history
+#   - scd2: Full history tracking with effective dates
+#   - full_refresh: Complete table overwrite
+#
+# Source options:
+#   - table: Direct table read (catalog.schema.table)
+#   - sql: Custom SQL query (joins, aggregations, filters)
+# ============================================
+
+tables:
+  # ============================================
+  # ACTIVE EXAMPLE: SCD Type 2 with Table Source
+  # ============================================
+  - name: customer_history
+    source:
+      table: workspace.default.customer
+    target:
+      table_name: workspace.default.customer_target
+    load_type: scd2  # Full history tracking
+    scd:
+      keys: [customer_id]
+      columns:
+        - customer_name
+        - email
+        - city
+    delete_handling:
+      enabled: true
+      column: is_deleted
+      value: Y
+
+  # ============================================
+  # EXAMPLE 1: SCD Type 1 (Upsert - No History)
+  # ============================================
+  # Use case: Maintain only current state, no historical tracking
+  # ACTIVE: Product catalog example
+  - name: product_current
+    source:
+      table: workspace.default.product_source
+    target:
+      table_name: workspace.default.product_current
+    load_type: scd1
+    scd:
+      keys: [product_id]
+      columns:
+        - product_name
+        - category
+        - price
+        - description
+        - last_updated
+
+  # Alternative: Customer current state (uncomment to use)
+  # - name: customer_current
+  #   source:
+  #     table: workspace.default.customer
+  #   target:
+  #     table_name: workspace.default.customer_current
+  #   load_type: scd1
+  #   scd:
+  #     keys: [customer_id]
+  #     columns:
+  #       - customer_name
+  #       - email
+  #       - city
+
+  # ============================================
+  # EXAMPLE 2: Incremental Load (Append Only)
+  # ============================================
+  # Use case: Event logs, transactions, append-only data
+  # Uncomment to use:
+  # - name: events_incremental
+  #   source:
+  #     table: workspace.default.raw_events
+  #   target:
+  #     table_name: workspace.default.events
+  #   load_type: incremental
+  #   scd:
+  #     keys: [event_id]  # For deduplication (optional)
+
+  # ============================================
+  # EXAMPLE 3: Full Refresh (Complete Overwrite)
+  # ============================================
+  # Use case: Reference data, lookup tables, daily snapshots
+  # Uncomment to use:
+  # - name: reference_data
+  #   source:
+  #     table: workspace.default.ref_source
+  #   target:
+  #     table_name: workspace.default.ref_target
+  #   load_type: full_refresh
+
+  # ============================================
+  # EXAMPLE 4: Custom SQL - Simple Join
+  # ============================================
+  # Use case: Combine data from multiple tables
+  # Uncomment to use:
+  # - name: customer_orders_summary
+  #   source:
+  #     sql: |
+  #       SELECT 
+  #         c.customer_id,
+  #         c.customer_name,
+  #         c.email,
+  #         c.city,
+  #         COUNT(o.order_id) as total_orders,
+  #         SUM(o.amount) as total_amount,
+  #         MAX(o.order_date) as last_order_date
+  #       FROM workspace.default.customer c
+  #       LEFT JOIN workspace.default.orders o 
+  #         ON c.customer_id = o.customer_id
+  #       GROUP BY c.customer_id, c.customer_name, c.email, c.city
+  #   target:
+  #     table_name: workspace.default.customer_orders_summary
+  #   load_type: scd1  # Upsert with latest aggregated values
+  #   scd:
+  #     keys: [customer_id]
+  #     columns: [customer_name, email, city, total_orders, total_amount, last_order_date]
+
+  # ============================================
+  # EXAMPLE 5: Custom SQL - Filtered Data
+  # ============================================
+  # Use case: Load only active/recent data with transformations
+  # Uncomment to use:
+  # - name: active_customers_last_30_days
+  #   source:
+  #     sql: |
+  #       SELECT 
+  #         customer_id,
+  #         customer_name,
+  #         email,
+  #         UPPER(city) as city,
+  #         CASE 
+  #           WHEN total_orders > 10 THEN 'VIP'
+  #           WHEN total_orders > 5 THEN 'Regular'
+  #           ELSE 'New'
+  #         END as customer_tier
+  #       FROM workspace.default.customer
+  #       WHERE last_order_date >= CURRENT_DATE() - INTERVAL 30 DAYS
+  #         AND is_deleted = 'N'
+  #   target:
+  #     table_name: workspace.default.active_customers
+  #   load_type: full_refresh  # Daily refresh
+
+  # ============================================
+  # EXAMPLE 6: Custom SQL - Complex Multi-Table Join
+  # ============================================
+  # Use case: Customer 360 view with multiple data sources
+  # Uncomment to use:
+  # - name: customer_360_view
+  #   source:
+  #     sql: |
+  #       SELECT 
+  #         c.customer_id,
+  #         c.customer_name,
+  #         c.email,
+  #         c.city,
+  #         COUNT(DISTINCT o.order_id) as order_count,
+  #         SUM(o.amount) as lifetime_value,
+  #         COUNT(DISTINCT p.product_id) as unique_products,
+  #         MAX(o.order_date) as last_purchase_date,
+  #         DATEDIFF(CURRENT_DATE(), MAX(o.order_date)) as days_since_purchase,
+  #         AVG(o.amount) as avg_order_value
+  #       FROM workspace.default.customer c
+  #       LEFT JOIN workspace.default.orders o ON c.customer_id = o.customer_id
+  #       LEFT JOIN workspace.default.order_items oi ON o.order_id = oi.order_id
+  #       LEFT JOIN workspace.default.products p ON oi.product_id = p.product_id
+  #       WHERE c.is_deleted = 'N'
+  #       GROUP BY c.customer_id, c.customer_name, c.email, c.city
+  #   target:
+  #     table_name: workspace.default.customer_360
+  #   load_type: scd2  # Track changes in customer behavior over time
+  #   scd:
+  #     keys: [customer_id]
+  #     columns: 
+  #       - customer_name
+  #       - email
+  #       - city
+  #       - order_count
+  #       - lifetime_value
+  #       - unique_products
+  #       - last_purchase_date
+  #       - days_since_purchase
+  #       - avg_order_value
+  #   delete_handling:
+  #     enabled: false
+
+  # ============================================
+  # EXAMPLE 7: Incremental with Custom SQL
+  # ============================================
+  # Use case: Append only events with enrichment
+  # Uncomment to use:
+  # - name: enriched_events
+  #   source:
+  #     sql: |
+  #       SELECT 
+  #         e.event_id,
+  #         e.event_type,
+  #         e.event_date,
+  #         e.customer_id,
+  #         c.customer_name,
+  #         c.city,
+  #         e.event_value
+  #       FROM workspace.default.raw_events e
+  #       LEFT JOIN workspace.default.customer c ON e.customer_id = c.customer_id
+  #       WHERE e.event_date >= CURRENT_DATE() - INTERVAL 1 DAY
+  #   target:
+  #     table_name: workspace.default.enriched_events
+  #   load_type: incremental
+  #   scd:
+  #     keys: [event_id]  # Deduplicate by event_id
+
+  # ============================================
+  # EXAMPLE 8: SCD Type 2 without Delete Flag
+  # ============================================
+  # Use case: Track history but no explicit delete column
+  # Uncomment to use:
+  # - name: product_history
+  #   source:
+  #     table: workspace.default.product
+  #   target:
+  #     table_name: workspace.default.product_target
+  #   load_type: scd2
+  #   scd:
+  #     keys: [product_id]
+  #     columns:
+  #       - product_name
+  #       - category
+  #       - price
+  #       - description
+  #   delete_handling:
+  #     enabled: false  # No delete flag
+
+# ============================================
+# CONFIGURATION NOTES
+# ============================================
+# 
+# Load Type Selection Guide:
+# - incremental: Fast, append-only, good for logs/events
+# - scd1: Medium speed, current state only, good for reference data
+# - scd2: Slower, full history, good for compliance/audit
+# - full_refresh: Fast, complete overwrite, good for small reference tables
+#
+# Source Selection Guide:
+# - table: Simple, direct table read
+# - sql: Flexible, supports joins/aggregations/filters
+#
+# Delete Handling:
+# - enabled: true - Tracks explicit deletes via flag column
+# - enabled: false - Only tracks inserts and updates
+#
+# Keys vs Columns:
+# - keys: Primary key columns for matching records
+# - columns: Non-key columns to track for changes (SCD Type 2)
+# ============================================
+

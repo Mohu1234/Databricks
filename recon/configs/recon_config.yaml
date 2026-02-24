@@ -1,0 +1,83 @@
+# Reconciliation Configuration File
+# Define table pairs to reconcile and validation rules
+
+job:
+  name: data_reconciliation_job
+  batch_id: "2026-02-23"
+  results_table: workspace.default.recon_results  # Where to store reconciliation results
+  details_table: workspace.default.recon_details  # Where to store detailed mismatches
+
+# Define table pairs to reconcile
+reconciliations:
+  # Example 1: Customer table reconciliation
+  - name: customer_recon
+    source:
+      table: workspace.default.customer_source
+      alias: source
+    target:
+      table: workspace.default.customer_target
+      alias: target
+    
+    # Primary keys for matching records
+    keys:
+      - customer_id
+    
+    # Columns to compare (empty = all columns)
+    columns_to_compare: []  # Empty means compare all common columns
+    
+    # Columns to exclude from comparison
+    exclude_columns:
+      - created_at
+      - updated_at
+      - last_modified
+    
+    # Validation rules
+    validations:
+      schema_check: true          # Validate schema compatibility
+      row_count_check: true       # Compare row counts
+      data_comparison: true       # Compare actual data
+      null_check: true            # Check for null differences
+      duplicate_check: true       # Check for duplicates in keys
+    
+    # Thresholds
+    thresholds:
+      max_mismatch_percent: 5.0   # Alert if mismatch > 5%
+      max_missing_percent: 2.0    # Alert if missing records > 2%
+  
+  # Example 2: Product table reconciliation
+  - name: product_recon
+    source:
+      table: workspace.default.product_source
+      alias: src
+    target:
+      table: workspace.default.product_current
+      alias: tgt
+    
+    keys:
+      - product_id
+    
+    columns_to_compare:
+      - product_name
+      - category
+      - price
+      - description
+    
+    exclude_columns: []
+    
+    validations:
+      schema_check: true
+      row_count_check: true
+      data_comparison: true
+      null_check: true
+      duplicate_check: true
+    
+    thresholds:
+      max_mismatch_percent: 1.0
+      max_missing_percent: 0.5
+
+# Global settings
+settings:
+  sample_mismatches: 10           # Number of sample mismatches to store
+  enable_detailed_logging: true   # Store detailed mismatch records
+  fail_on_threshold_breach: false # Whether to fail job if thresholds breached
+  parallel_execution: false       # Run reconciliations in parallel (future)
