@@ -1,0 +1,181 @@
+# ============================================================================
+# Databricks Workspace Deployment Workflow
+# ============================================================================
+# Purpose: Automatically deploy Databricks workspace notebooks and files
+#          from the Git repository to a target Databricks workspace folder
+#          when a pull request is merged into the main or master branch.
+#
+# This workflow:
+# - Triggers on merged PRs to main/master branches
+# - Validates the PR merge event
+# - Deploys contents from ./databricks/ to /Repos/Databricks-git
+# - Uses Databricks CLI for secure, authenticated deployment
+# - Includes logging and validation at each step
+# ============================================================================
+
+name: Deploy to Databricks Workspace
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+      - master
+
+env:
+  # Configuration
+  DATABRICKS_LOCAL_FOLDER: ./databricks
+  DATABRICKS_TARGET_FOLDER: /Repos/Databricks-git
+  DATABRICKS_CLI_VERSION: "0.200.0"
+
+jobs:
+  deploy-databricks:
+    name: Deploy Databricks Workspace
+    runs-on: ubuntu-latest
+    
+    # Only run if the PR was merged (not just closed)
+    if: github.event.pull_request.merged == true
+
+    steps:
+      # Step 1: Validate that the workflow was triggered by a merged PR
+      - name: Validate PR Merge Event
+        run: |
+          echo "✓ Workflow triggered by merged pull request"
+          echo "PR #${{ github.event.pull_request.number }} - ${{ github.event.pull_request.title }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+
+      # Step 2: Check out the latest code from the repository
+      - name: Checkout Code
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      # Step 3: Validate that the Databricks local folder exists
+      - name: Validate Databricks Folder
+        run: |
+          if [ -d "${{ env.DATABRICKS_LOCAL_FOLDER }}" ]; then
+            echo "✓ Databricks folder found: ${{ env.DATABRICKS_LOCAL_FOLDER }}"
+            echo "Contents:"
+            find "${{ env.DATABRICKS_LOCAL_FOLDER }}" -type f | head -20
+            echo ""
+            echo "Total files to deploy:"
+            find "${{ env.DATABRICKS_LOCAL_FOLDER }}" -type f | wc -l
+          else
+            echo "✗ Error: Databricks folder not found at ${{ env.DATABRICKS_LOCAL_FOLDER }}"
+            exit 1
+          fi
+
+      # Step 4: Install Databricks CLI
+      - name: Install Databricks CLI
+        run: |
+          echo "Installing Databricks CLI version ${{ env.DATABRICKS_CLI_VERSION }}..."
+          pip install --upgrade pip setuptools
+          pip install databricks-cli==${{ env.DATABRICKS_CLI_VERSION }}
+          
+          # Verify installation
+          databricks --version
+          echo "✓ Databricks CLI installed successfully"
+
+      # Step 5: Configure Databricks Authentication
+      - name: Configure Databricks Authentication
+        run: |
+          # Create .databrickscfg for secure authentication
+          mkdir -p ~/.databricks
+          
+          cat > ~/.databrickscfg << EOF
+          [DEFAULT]
+          host = ${{ secrets.DATABRICKS_HOST }}
+          token = ${{ secrets.DATABRICKS_TOKEN }}
+          EOF
+          
+          chmod 600 ~/.databrickscfg
+          echo "✓ Databricks authentication configured"
+
+      # Step 6: Validate Databricks Connectivity
+      - name: Validate Databricks Connectivity
+        run: |
+          echo "Validating connection to Databricks workspace..."
+          databricks workspace list / || {
+            echo "✗ Failed to connect to Databricks workspace"
+            echo "Please verify DATABRICKS_HOST and DATABRICKS_TOKEN are set correctly"
+            exit 1
+          }
+          echo "✓ Successfully connected to Databricks workspace"
+
+      # Step 7: Create Target Folder if it doesn't exist
+      - name: Ensure Target Workspace Folder Exists
+        run: |
+          echo "Ensuring target folder exists: ${{ env.DATABRICKS_TARGET_FOLDER }}"
+          databricks workspace mkdirs "${{ env.DATABRICKS_TARGET_FOLDER }}" || true
+          echo "✓ Target workspace folder is ready"
+
+      # Step 8: Deploy Databricks Workspace Contents
+      - name: Deploy to Databricks Workspace
+        run: |
+          echo "Deploying from: ${{ env.DATABRICKS_LOCAL_FOLDER }}"
+          echo "Deploying to: ${{ env.DATABRICKS_TARGET_FOLDER }}"
+          echo ""
+          
+          # Deploy with overwrite flag
+          databricks workspace import_dir \
+            --overwrite \
+            "${{ env.DATABRICKS_LOCAL_FOLDER }}" \
+            "${{ env.DATABRICKS_TARGET_FOLDER }}"
+          
+          if [ $? -eq 0 ]; then
+            echo ""
+            echo "✓ Deployment completed successfully"
+          else
+            echo ""
+            echo "✗ Deployment failed"
+            exit 1
+          fi
+
+      # Step 9: Verify Deployment
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployed contents at: ${{ env.DATABRICKS_TARGET_FOLDER }}"
+          echo ""
+          databricks workspace list "${{ env.DATABRICKS_TARGET_FOLDER }}"
+          
+          if [ $? -eq 0 ]; then
+            echo ""
+            echo "✓ Deployment verification successful"
+          else
+            echo ""
+            echo "⚠ Warning: Could not verify deployment contents"
+            # Don't fail here as the deployment may still be successful
+          fi
+
+      # Step 10: Log Deployment Summary
+      - name: Deployment Summary
+        run: |
+          echo "============================================"
+          echo "Deployment Summary"
+          echo "============================================"
+          echo "Repository: ${{ github.repository }}"
+          echo "Merged PR: #${{ github.event.pull_request.number }}"
+          echo "Branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Source Folder: ${{ env.DATABRICKS_LOCAL_FOLDER }}"
+          echo "Target Folder: ${{ env.DATABRICKS_TARGET_FOLDER }}"
+          echo "Workspace Host: ${{ secrets.DATABRICKS_HOST }}"
+          echo "Timestamp: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "============================================"
+
+      # Step 11: Handle Deployment Failure
+      - name: Handle Deployment Failure
+        if: failure()
+        run: |
+          echo "✗ Deployment workflow failed"
+          echo "Please check the logs above for details"
+          exit 1
+
+      # Step 12: Success Notification
+      - name: Deployment Success
+        if: success()
+        run: |
+          echo "✓ Databricks workspace deployment completed successfully"
+          echo "PR #${{ github.event.pull_request.number }} has been deployed to production"
